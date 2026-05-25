@@ -1,3 +1,4 @@
+import AppKit
 import Charts
 import CodexDockNotifierCore
 import SwiftUI
@@ -34,12 +35,53 @@ final class UsageDashboardWindowController: NSWindowController {
 final class UsageDashboardViewModel: ObservableObject {
     @Published var report: UsageReport = .empty
     @Published var lastUpdatedText = "未刷新"
+    @Published var exportStatusText = ""
 
     private let analyzer = UsageStatsAnalyzer()
 
     func refresh() {
         report = analyzer.buildReport()
         lastUpdatedText = Self.dateTimeFormatter.string(from: report.generatedAt)
+    }
+
+    func exportMarkdown() {
+        saveFile(
+            defaultName: "codex-usage-report.md",
+            content: UsageReportExporter.markdown(report: report)
+        )
+    }
+
+    func exportSessionsCSV() {
+        saveFile(
+            defaultName: "codex-sessions.csv",
+            content: UsageReportExporter.sessionsCSV(report: report)
+        )
+    }
+
+    func exportDailyCSV() {
+        saveFile(
+            defaultName: "codex-daily-usage.csv",
+            content: UsageReportExporter.dailyCSV(report: report)
+        )
+    }
+
+    private func saveFile(defaultName: String, content: String) {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = defaultName
+        panel.canCreateDirectories = true
+
+        guard panel.runModal() == .OK,
+              let url = panel.url
+        else {
+            return
+        }
+
+        do {
+            try content.write(to: url, atomically: true, encoding: .utf8)
+            exportStatusText = "已导出 \(url.lastPathComponent)"
+        } catch {
+            exportStatusText = "导出失败：\(error.localizedDescription)"
+        }
     }
 
     private static let dateTimeFormatter: DateFormatter = {
@@ -109,6 +151,18 @@ struct UsageDashboardView: View {
 
                         sessionTable
                     }
+
+                    LazyVGrid(columns: [
+                        GridItem(.flexible(minimum: 420), spacing: 16),
+                        GridItem(.flexible(minimum: 420), spacing: 16)
+                    ], spacing: 16) {
+                        chartCard(title: "项目用量", subtitle: "按 cwd 聚合，方便定位最耗 token 的项目") {
+                            ProjectUsageBarChart(rows: Array(viewModel.report.projectUsage.prefix(8)))
+                                .frame(height: 260)
+                        }
+
+                        modelAnalysisTable
+                    }
                 }
                 .padding(18)
             }
@@ -136,6 +190,28 @@ struct UsageDashboardView: View {
             .pickerStyle(.segmented)
             .frame(width: 220)
 
+            Menu {
+                Button {
+                    viewModel.exportMarkdown()
+                } label: {
+                    Label("Markdown 报告", systemImage: "doc.text")
+                }
+
+                Button {
+                    viewModel.exportSessionsCSV()
+                } label: {
+                    Label("Session CSV", systemImage: "tablecells")
+                }
+
+                Button {
+                    viewModel.exportDailyCSV()
+                } label: {
+                    Label("Daily CSV", systemImage: "calendar")
+                }
+            } label: {
+                Label("导出", systemImage: "square.and.arrow.down")
+            }
+
             Button("刷新") {
                 viewModel.refresh()
             }
@@ -145,18 +221,23 @@ struct UsageDashboardView: View {
     }
 
     private var kpiGrid: some View {
-        LazyVGrid(columns: [
-            GridItem(.flexible(), spacing: 12),
-            GridItem(.flexible(), spacing: 12),
-            GridItem(.flexible(), spacing: 12),
-            GridItem(.flexible(), spacing: 12),
-            GridItem(.flexible(), spacing: 12)
-        ], spacing: 12) {
+        VStack(alignment: .leading, spacing: 8) {
+            LazyVGrid(columns: [
+                GridItem(.adaptive(minimum: 150), spacing: 12)
+            ], spacing: 12) {
             KPIBox(title: "全部 Token", value: formatCompact(viewModel.report.totalUsage.total), caption: "近似计费 \(formatCompact(viewModel.report.totalUsage.billableApproximation))")
             KPIBox(title: "今天", value: formatCompact(viewModel.report.todayUsage.total), caption: "\(formatCompact(viewModel.report.todayUsage.output)) output")
             KPIBox(title: "7 天", value: formatCompact(viewModel.report.last7DaysUsage.total), caption: "\(formatCompact(viewModel.report.last7DaysUsage.reasoning)) reasoning")
             KPIBox(title: "30 天", value: formatCompact(viewModel.report.last30DaysUsage.total), caption: "\(formatCompact(viewModel.report.last30DaysUsage.cachedInput)) cached")
+                KPIBox(title: "成本估算", value: formatCurrency(viewModel.report.totalEstimatedCostUSD), caption: "30 天 \(formatCurrency(viewModel.report.last30DaysEstimatedCostUSD))")
             KPIBox(title: "Sessions", value: "\(viewModel.report.sessionCount)", caption: "\(viewModel.report.completionCount) 次完成")
+            }
+
+            if !viewModel.exportStatusText.isEmpty {
+                Text(viewModel.exportStatusText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -166,6 +247,7 @@ struct UsageDashboardView: View {
                 HStack {
                     Text("标题").frame(maxWidth: .infinity, alignment: .leading)
                     Text("模型").frame(width: 120, alignment: .leading)
+                    Text("成本").frame(width: 74, alignment: .trailing)
                     Text("Token").frame(width: 92, alignment: .trailing)
                 }
                 .font(.caption.weight(.semibold))
@@ -194,9 +276,66 @@ struct UsageDashboardView: View {
                             .lineLimit(1)
                             .truncationMode(.middle)
 
+                        Text(formatCurrency(session.estimatedCostUSD))
+                            .font(.caption)
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                            .frame(width: 74, alignment: .trailing)
+
                         Text(formatCompact(session.usage.total))
                             .monospacedDigit()
                             .frame(width: 92, alignment: .trailing)
+                    }
+                    .padding(.vertical, 8)
+                }
+            }
+            .frame(height: 260, alignment: .top)
+        }
+    }
+
+    private var modelAnalysisTable: some View {
+        chartCard(title: "模型切换分析", subtitle: "看不同模型的平均消耗、输出占比和缓存命中") {
+            VStack(spacing: 0) {
+                HStack {
+                    Text("模型").frame(maxWidth: .infinity, alignment: .leading)
+                    Text("均值").frame(width: 72, alignment: .trailing)
+                    Text("输出").frame(width: 56, alignment: .trailing)
+                    Text("缓存").frame(width: 56, alignment: .trailing)
+                    Text("成本").frame(width: 74, alignment: .trailing)
+                }
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.bottom, 8)
+
+                ForEach(Array(viewModel.report.modelUsage.prefix(8))) { model in
+                    Divider()
+                    HStack(spacing: 10) {
+                        Text(model.model)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+
+                        Text(formatCompact(model.averageTokensPerSession))
+                            .monospacedDigit()
+                            .frame(width: 72, alignment: .trailing)
+
+                        Text(formatPercent(model.outputRatio))
+                            .font(.caption)
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                            .frame(width: 56, alignment: .trailing)
+
+                        Text(formatPercent(model.cachedRatio))
+                            .font(.caption)
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                            .frame(width: 56, alignment: .trailing)
+
+                        Text(formatCurrency(model.estimatedCostUSD))
+                            .font(.caption)
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                            .frame(width: 74, alignment: .trailing)
                     }
                     .padding(.vertical, 8)
                 }
@@ -428,6 +567,39 @@ private struct ModelUsageBarChart: View {
     }
 }
 
+private struct ProjectUsageBarChart: View {
+    var rows: [ProjectUsage]
+
+    var body: some View {
+        if rows.isEmpty {
+            EmptyStateView(text: "还没有项目用量数据")
+        } else {
+            Chart(rows) { row in
+                BarMark(
+                    x: .value("Token", row.usage.total),
+                    y: .value("项目", row.name)
+                )
+                .foregroundStyle(Color.green)
+                .annotation(position: .trailing) {
+                    Text(formatCompact(row.usage.total))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .chartXAxis {
+                AxisMarks { value in
+                    AxisGridLine()
+                    AxisValueLabel {
+                        if let int = value.as(Int.self) {
+                            Text(formatCompact(int))
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 private struct EmptyStateView: View {
     var text: String
 
@@ -449,4 +621,18 @@ private func formatCompact(_ value: Int) -> String {
         return String(format: "%.1fK", Double(value) / 1_000)
     }
     return "\(value)"
+}
+
+private func formatCurrency(_ value: Double) -> String {
+    if value >= 1_000 {
+        return "$" + String(format: "%.1fK", value / 1_000)
+    }
+    if value >= 10 {
+        return "$" + String(format: "%.2f", value)
+    }
+    return "$" + String(format: "%.4f", value)
+}
+
+private func formatPercent(_ value: Double) -> String {
+    String(format: "%.0f%%", value * 100)
 }

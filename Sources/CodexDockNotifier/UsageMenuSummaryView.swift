@@ -5,11 +5,13 @@ final class UsageMenuSummaryView: NSView {
     private var report: UsageReport
     private var pendingCount: Int
     private var lastCompletion: CodexCompletion?
+    private var runningCount: Int
 
-    init(report: UsageReport, pendingCount: Int, lastCompletion: CodexCompletion?) {
+    init(report: UsageReport, pendingCount: Int, lastCompletion: CodexCompletion?, runningCount: Int = 0) {
         self.report = report
         self.pendingCount = pendingCount
         self.lastCompletion = lastCompletion
+        self.runningCount = runningCount
         super.init(frame: NSRect(x: 0, y: 0, width: 344, height: 196))
         wantsLayer = true
     }
@@ -18,10 +20,16 @@ final class UsageMenuSummaryView: NSView {
         fatalError("init(coder:) has not been implemented")
     }
 
-    func update(report: UsageReport, pendingCount: Int, lastCompletion: CodexCompletion?) {
+    func update(
+        report: UsageReport,
+        pendingCount: Int,
+        lastCompletion: CodexCompletion?,
+        runningCount: Int = 0
+    ) {
         self.report = report
         self.pendingCount = pendingCount
         self.lastCompletion = lastCompletion
+        self.runningCount = runningCount
         needsDisplay = true
     }
 
@@ -62,11 +70,13 @@ final class UsageMenuSummaryView: NSView {
             color: .labelColor
         )
 
-        let pending = pendingCount > 0 ? "\(pendingCount) 个未读完成" : "无未读完成"
+        let pending = pendingCount > 0
+            ? "\(pendingCount) 个未读完成"
+            : (runningCount > 0 ? "\(runningCount) 个运行中" : "无未读完成")
         drawPill(
             pending,
             in: NSRect(x: rect.maxX - 112, y: rect.minY + 10, width: 98, height: 22),
-            active: pendingCount > 0
+            active: pendingCount > 0 || runningCount > 0
         )
     }
 
@@ -75,7 +85,7 @@ final class UsageMenuSummaryView: NSView {
         let cardWidth = (rect.width - 44) / 3
         let cards = [
             ("今日", formatCompact(report.todayUsage.total), "\(formatCompact(report.todayUsage.output)) out"),
-            ("7 天", formatCompact(report.last7DaysUsage.total), "\(report.sessionCount) sessions"),
+            ("7 天", formatCompact(report.last7DaysUsage.total), formatCurrency(report.last7DaysEstimatedCostUSD)),
             ("30 天", formatCompact(report.last30DaysUsage.total), "\(formatCompact(report.last30DaysUsage.cachedInput)) cached")
         ]
 
@@ -149,7 +159,8 @@ final class UsageMenuSummaryView: NSView {
     private func drawFooter(in rect: NSRect) {
         let model = report.modelUsage.first?.model ?? "unknown"
         let latest = lastCompletion?.threadName ?? "等待 Codex 完成任务"
-        let text = "模型 \(model)  ·  最近 \(latest)"
+        let cost = formatCurrency(report.todayEstimatedCostUSD)
+        let text = "\(cost) today  ·  模型 \(model)  ·  最近 \(latest)"
         drawText(
             text,
             in: NSRect(x: rect.minX + 12, y: rect.maxY - 24, width: rect.width - 24, height: 14),
@@ -218,13 +229,17 @@ final class UsageMenuSummaryView: NSView {
         }
     }
 
-    private func formatCompact(_ value: Int) -> String {
+private func formatCompact(_ value: Int) -> String {
         if value >= 1_000_000 {
             return String(format: "%.1fM", Double(value) / 1_000_000)
         }
         if value >= 1_000 {
             return String(format: "%.1fK", Double(value) / 1_000)
-        }
-        return "\(value)"
     }
+    return "\(value)"
+}
+
+private func formatCurrency(_ value: Double) -> String {
+    "$" + String(format: "%.3f", value)
+}
 }

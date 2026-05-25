@@ -10,13 +10,28 @@ public final class UsageStatsAnalyzer: @unchecked Sendable {
         var startedAt: Date?
         var updatedAt: Date?
         var usage: TokenUsage = .zero
+        var estimatedCostUSD: Double = 0
         var eventCount = 0
         var completionCount = 0
+        var lastUserMessageAt: Date?
+        var lastTokenAt: Date?
+        var lastFinalAnswerAt: Date?
+        var latestEventAt: Date?
     }
 
     private struct MutableDay {
         var date: Date
         var usage: TokenUsage = .zero
+        var estimatedCostUSD: Double = 0
+        var sessions: Set<String> = []
+        var completionCount = 0
+    }
+
+    private struct MutableProject {
+        var name: String
+        var path: String
+        var usage: TokenUsage = .zero
+        var estimatedCostUSD: Double = 0
         var sessions: Set<String> = []
         var completionCount = 0
     }
@@ -48,7 +63,10 @@ public final class UsageStatsAnalyzer: @unchecked Sendable {
         var daily: [String: MutableDay] = [:]
         var modelSessions: [String: Set<String>] = [:]
         var modelUsage: [String: TokenUsage] = [:]
+        var modelCosts: [String: Double] = [:]
+        var projectUsage: [String: MutableProject] = [:]
         var totalUsage = TokenUsage.zero
+        var totalEstimatedCostUSD: Double = 0
 
         for url in sessionFiles() {
             processSessionFile(
@@ -58,7 +76,10 @@ public final class UsageStatsAnalyzer: @unchecked Sendable {
                 daily: &daily,
                 modelSessions: &modelSessions,
                 modelUsage: &modelUsage,
-                totalUsage: &totalUsage
+                modelCosts: &modelCosts,
+                projectUsage: &projectUsage,
+                totalUsage: &totalUsage,
+                totalEstimatedCostUSD: &totalEstimatedCostUSD
             )
         }
 
@@ -72,6 +93,7 @@ public final class UsageStatsAnalyzer: @unchecked Sendable {
                     dateKey: key,
                     date: value.date,
                     usage: value.usage,
+                    estimatedCostUSD: value.estimatedCostUSD,
                     sessionCount: value.sessions.count,
                     completionCount: value.completionCount
                 )
@@ -82,15 +104,22 @@ public final class UsageStatsAnalyzer: @unchecked Sendable {
         let last7 = dailyUsage
             .filter { $0.date >= sevenDayStart }
             .reduce(TokenUsage.zero) { $0 + $1.usage }
+        let last7Cost = dailyUsage
+            .filter { $0.date >= sevenDayStart }
+            .reduce(0.0) { $0 + $1.estimatedCostUSD }
         let last30 = dailyUsage
             .filter { $0.date >= thirtyDayStart }
             .reduce(TokenUsage.zero) { $0 + $1.usage }
+        let last30Cost = dailyUsage
+            .filter { $0.date >= thirtyDayStart }
+            .reduce(0.0) { $0 + $1.estimatedCostUSD }
 
         let modelRows = modelUsage
             .map { model, usage in
                 ModelUsage(
                     model: model,
                     usage: usage,
+                    estimatedCostUSD: modelCosts[model] ?? 0,
                     sessionCount: modelSessions[model]?.count ?? 0
                 )
             }
@@ -111,6 +140,7 @@ public final class UsageStatsAnalyzer: @unchecked Sendable {
                     startedAt: session.startedAt,
                     updatedAt: session.updatedAt,
                     usage: session.usage,
+                    estimatedCostUSD: session.estimatedCostUSD,
                     eventCount: session.eventCount,
                     completionCount: session.completionCount
                 )
@@ -123,16 +153,45 @@ public final class UsageStatsAnalyzer: @unchecked Sendable {
             }
 
         let completionCount = sessionRows.reduce(0) { $0 + $1.completionCount }
+        let projectRows = projectUsage.values
+            .map { project in
+                ProjectUsage(
+                    name: project.name,
+                    path: project.path,
+                    usage: project.usage,
+                    estimatedCostUSD: project.estimatedCostUSD,
+                    sessionCount: project.sessions.count,
+                    completionCount: project.completionCount
+                )
+            }
+            .sorted { lhs, rhs in
+                if lhs.usage.total == rhs.usage.total {
+                    return lhs.name < rhs.name
+                }
+                return lhs.usage.total > rhs.usage.total
+            }
+
+        let runningRows = sessions.values
+            .compactMap { runningSession(from: $0, threadInfo: threadInfo, now: now) }
+            .sorted { lhs, rhs in
+                lhs.lastActivityAt > rhs.lastActivityAt
+            }
 
         return UsageReport(
             generatedAt: now,
             totalUsage: totalUsage,
+            totalEstimatedCostUSD: totalEstimatedCostUSD,
             todayUsage: todayUsage,
+            todayEstimatedCostUSD: daily[todayKey]?.estimatedCostUSD ?? 0,
             last7DaysUsage: last7,
+            last7DaysEstimatedCostUSD: last7Cost,
             last30DaysUsage: last30,
+            last30DaysEstimatedCostUSD: last30Cost,
             dailyUsage: dailyUsage,
             modelUsage: modelRows,
+            projectUsage: projectRows,
             sessions: sessionRows,
+            runningSessions: runningRows,
             sessionCount: sessionRows.count,
             completionCount: completionCount
         )
@@ -145,7 +204,10 @@ public final class UsageStatsAnalyzer: @unchecked Sendable {
         daily: inout [String: MutableDay],
         modelSessions: inout [String: Set<String>],
         modelUsage: inout [String: TokenUsage],
-        totalUsage: inout TokenUsage
+        modelCosts: inout [String: Double],
+        projectUsage: inout [String: MutableProject],
+        totalUsage: inout TokenUsage,
+        totalEstimatedCostUSD: inout Double
     ) {
         let fallbackID = CodexCompletionParser.threadID(from: url.path) ?? url.deletingPathExtension().lastPathComponent
         var session = sessions[fallbackID] ?? MutableSession(
@@ -175,6 +237,12 @@ public final class UsageStatsAnalyzer: @unchecked Sendable {
                 continue
             }
 
+            let eventTimestamp = parseDate(object["timestamp"] as? String)
+            if let eventTimestamp {
+                session.latestEventAt = latestDate(session.latestEventAt, eventTimestamp)
+                session.updatedAt = latestDate(session.updatedAt, eventTimestamp)
+            }
+
             if object["type"] as? String == "session_meta",
                let payload = object["payload"] as? [String: Any] {
                 if let id = payload["id"] as? String, id.lowercased() != session.id {
@@ -191,6 +259,7 @@ public final class UsageStatsAnalyzer: @unchecked Sendable {
                     ?? parseDate(object["timestamp"] as? String)
                     ?? session.startedAt
                 session.updatedAt = session.startedAt ?? session.updatedAt
+                session.latestEventAt = latestDate(session.latestEventAt, session.startedAt)
                 session.cwd = payload["cwd"] as? String ?? session.cwd
                 session.provider = payload["model_provider"] as? String ?? session.provider
                 session.model = (payload["model"] as? String) ?? session.model
@@ -201,14 +270,27 @@ public final class UsageStatsAnalyzer: @unchecked Sendable {
             if let payload = object["payload"] as? [String: Any],
                object["type"] as? String == "response_item",
                payload["type"] as? String == "message",
+               payload["role"] as? String == "user" {
+                session.lastUserMessageAt = eventTimestamp ?? session.updatedAt ?? session.lastUserMessageAt
+                continue
+            }
+
+            if let payload = object["payload"] as? [String: Any],
+               object["type"] as? String == "response_item",
+               payload["type"] as? String == "message",
                payload["role"] as? String == "assistant",
                payload["phase"] as? String == "final_answer" {
                 session.completionCount += 1
-                session.updatedAt = parseDate(object["timestamp"] as? String) ?? session.updatedAt
+                session.updatedAt = eventTimestamp ?? session.updatedAt
+                session.lastFinalAnswerAt = eventTimestamp ?? session.updatedAt ?? session.lastFinalAnswerAt
                 let key = dayKey(for: session.updatedAt ?? Date())
                 ensureDay(key, at: session.updatedAt ?? Date(), daily: &daily)
                 daily[key]?.completionCount += 1
                 daily[key]?.sessions.insert(session.id)
+                let projectKey = normalizedProjectPath(session.cwd)
+                ensureProject(projectKey, projects: &projectUsage)
+                projectUsage[projectKey]?.completionCount += 1
+                projectUsage[projectKey]?.sessions.insert(session.id)
                 continue
             }
 
@@ -226,21 +308,33 @@ public final class UsageStatsAnalyzer: @unchecked Sendable {
                 continue
             }
 
-            let timestamp = parseDate(object["timestamp"] as? String) ?? Date()
+            let timestamp = eventTimestamp ?? Date()
             let day = dayKey(for: timestamp)
             let model = normalizedModel(session.model ?? threadInfo[session.id]?.model ?? session.provider)
+            let cost = UsageCostEstimator.estimateUSD(for: usage, model: model)
 
             session.usage.add(usage)
+            session.estimatedCostUSD += cost
             session.eventCount += 1
             session.updatedAt = timestamp
+            session.lastTokenAt = timestamp
 
             ensureDay(day, at: timestamp, daily: &daily)
             daily[day]?.usage.add(usage)
+            daily[day]?.estimatedCostUSD += cost
             daily[day]?.sessions.insert(session.id)
 
             totalUsage.add(usage)
+            totalEstimatedCostUSD += cost
             modelUsage[model, default: .zero].add(usage)
+            modelCosts[model, default: 0] += cost
             modelSessions[model, default: []].insert(session.id)
+
+            let projectKey = normalizedProjectPath(session.cwd)
+            ensureProject(projectKey, projects: &projectUsage)
+            projectUsage[projectKey]?.usage.add(usage)
+            projectUsage[projectKey]?.estimatedCostUSD += cost
+            projectUsage[projectKey]?.sessions.insert(session.id)
         }
 
         sessions[session.id] = session
@@ -265,6 +359,17 @@ public final class UsageStatsAnalyzer: @unchecked Sendable {
         if daily[key] == nil {
             daily[key] = MutableDay(date: calendar.startOfDay(for: timestamp))
         }
+    }
+
+    private func ensureProject(_ path: String, projects: inout [String: MutableProject]) {
+        guard projects[path] == nil else {
+            return
+        }
+
+        projects[path] = MutableProject(
+            name: projectName(for: path),
+            path: path
+        )
     }
 
     private func tokenUsage(from object: [String: Any]) -> TokenUsage {
@@ -296,6 +401,62 @@ public final class UsageStatsAnalyzer: @unchecked Sendable {
         let month = components.month ?? 0
         let day = components.day ?? 0
         return String(format: "%04d-%02d-%02d", year, month, day)
+    }
+
+    private func runningSession(
+        from session: MutableSession,
+        threadInfo: [String: CodexSessionIndex.ThreadInfo],
+        now: Date
+    ) -> RunningSession? {
+        let startMarker = latestDate(session.lastUserMessageAt, session.lastTokenAt)
+        let lastFinal = session.lastFinalAnswerAt ?? .distantPast
+        guard let marker = startMarker,
+              marker > lastFinal
+        else {
+            return nil
+        }
+
+        let lastActivityAt = session.latestEventAt ?? marker
+        guard now.timeIntervalSince(lastActivityAt) < 6 * 60 * 60 else {
+            return nil
+        }
+
+        return RunningSession(
+            id: session.id,
+            title: session.title ?? threadInfo[session.id]?.title ?? "Untitled session",
+            model: normalizedModel(session.model ?? threadInfo[session.id]?.model ?? session.provider),
+            cwd: session.cwd,
+            startedAt: session.lastUserMessageAt ?? session.startedAt,
+            lastActivityAt: lastActivityAt,
+            runningForSeconds: max(0, now.timeIntervalSince(session.lastUserMessageAt ?? marker))
+        )
+    }
+
+    private func latestDate(_ lhs: Date?, _ rhs: Date?) -> Date? {
+        switch (lhs, rhs) {
+        case let (lhs?, rhs?):
+            return max(lhs, rhs)
+        case let (lhs?, nil):
+            return lhs
+        case let (nil, rhs?):
+            return rhs
+        case (nil, nil):
+            return nil
+        }
+    }
+
+    private func normalizedProjectPath(_ path: String) -> String {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "unknown" : trimmed
+    }
+
+    private func projectName(for path: String) -> String {
+        guard path != "unknown" else {
+            return "未知项目"
+        }
+
+        let name = URL(fileURLWithPath: path).lastPathComponent
+        return name.isEmpty ? path : name
     }
 
     private func parseDate(_ string: String?) -> Date? {

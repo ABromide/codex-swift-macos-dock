@@ -51,6 +51,10 @@ final class CodexMonitor: @unchecked Sendable {
         scan(notify: true)
     }
 
+    func completionHistory() -> [CodexCompletion] {
+        state.completionHistory
+    }
+
     private func scan(notify: Bool) {
         reloadSessionIndexIfNeeded(force: false)
 
@@ -147,7 +151,16 @@ final class CodexMonitor: @unchecked Sendable {
             return
         }
 
+        recordCompletionInHistory(completion)
         onCompletion(completion)
+    }
+
+    private func recordCompletionInHistory(_ completion: CodexCompletion) {
+        state.completionHistory.removeAll { $0.key == completion.key }
+        state.completionHistory.insert(completion, at: 0)
+        if state.completionHistory.count > 200 {
+            state.completionHistory = Array(state.completionHistory.prefix(200))
+        }
     }
 
     private func readData(from url: URL, offset: UInt64) -> Data? {

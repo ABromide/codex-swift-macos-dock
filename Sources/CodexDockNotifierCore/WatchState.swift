@@ -11,10 +11,29 @@ public struct FileCursor: Codable, Equatable, Sendable {
 public struct WatchState: Codable, Equatable, Sendable {
     public var cursors: [String: FileCursor]
     public var notifiedKeys: [String]
+    public var completionHistory: [CodexCompletion]
 
-    public init(cursors: [String: FileCursor] = [:], notifiedKeys: [String] = []) {
+    public init(
+        cursors: [String: FileCursor] = [:],
+        notifiedKeys: [String] = [],
+        completionHistory: [CodexCompletion] = []
+    ) {
         self.cursors = cursors
         self.notifiedKeys = notifiedKeys
+        self.completionHistory = completionHistory
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case cursors
+        case notifiedKeys
+        case completionHistory
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        cursors = try container.decodeIfPresent([String: FileCursor].self, forKey: .cursors) ?? [:]
+        notifiedKeys = try container.decodeIfPresent([String].self, forKey: .notifiedKeys) ?? []
+        completionHistory = try container.decodeIfPresent([CodexCompletion].self, forKey: .completionHistory) ?? []
     }
 
     public static func load(from url: URL) -> WatchState {

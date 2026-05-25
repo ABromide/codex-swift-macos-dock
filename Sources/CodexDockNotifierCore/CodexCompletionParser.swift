@@ -20,6 +20,14 @@ public enum CodexCompletionParser {
         let timestamp = object["timestamp"] as? String ?? ""
         let text = outputText(from: payload["content"])
         let preview = makePreview(from: text)
+        let fileMentions = extractFileMentions(from: text)
+        let tested = detectsVerification(in: text)
+        let needsAttention = detectsNeedsAttention(in: text)
+        let badges = makeBadges(
+            fileMentionCount: fileMentions.count,
+            tested: tested,
+            needsAttention: needsAttention
+        )
         let key = "\(filePath):\(lineOffset)"
 
         return CodexCompletion(
@@ -29,7 +37,11 @@ public enum CodexCompletionParser {
             threadName: nil,
             filePath: filePath,
             lineOffset: lineOffset,
-            preview: preview
+            preview: preview,
+            badges: badges,
+            fileMentions: fileMentions,
+            tested: tested,
+            needsAttention: needsAttention
         )
     }
 
@@ -78,5 +90,96 @@ public enum CodexCompletionParser {
                 return part["text"] as? String
             }
             .joined(separator: "\n")
+    }
+
+    private static func makeBadges(
+        fileMentionCount: Int,
+        tested: Bool,
+        needsAttention: Bool
+    ) -> [String] {
+        var badges: [String] = []
+        if fileMentionCount > 0 {
+            badges.append("\(fileMentionCount) 个文件")
+        }
+        if tested {
+            badges.append("已验证")
+        }
+        if needsAttention {
+            badges.append("需处理")
+        }
+        return badges
+    }
+
+    private static func detectsVerification(in text: String) -> Bool {
+        let lowercased = text.lowercased()
+        let keywords = [
+            "test passed",
+            "tests passed",
+            "smoke tests passed",
+            "verified",
+            "verification",
+            "passed",
+            "ran tests",
+            "make test",
+            "swift test",
+            "npm test",
+            "pytest",
+            "验证",
+            "测试通过",
+            "已测试",
+            "已验证",
+            "构建通过"
+        ]
+        return keywords.contains { lowercased.contains($0.lowercased()) }
+    }
+
+    private static func detectsNeedsAttention(in text: String) -> Bool {
+        let lowercased = text.lowercased()
+        let keywords = [
+            "failed",
+            "failure",
+            "unable",
+            "could not",
+            "not able",
+            "blocked",
+            "需要你",
+            "需要手动",
+            "未能",
+            "失败",
+            "报错",
+            "阻塞",
+            "没有运行",
+            "无法"
+        ]
+        return keywords.contains { lowercased.contains($0.lowercased()) }
+    }
+
+    private static func extractFileMentions(from text: String) -> [String] {
+        let pattern = #"(?:^|[\s`'"\(\[])([A-Za-z0-9_./~+-]+?\.(?:swift|md|json|jsonl|plist|sh|txt|yml|yaml|toml|csv|ts|tsx|js|jsx|css|html|py|rb|go|rs|java|kt|m|mm|h|hpp|cpp|c|sql))(?:$|[\s`'",\)\].:;])"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            return []
+        }
+
+        let nsRange = NSRange(text.startIndex..<text.endIndex, in: text)
+        var seen: Set<String> = []
+        var matches: [String] = []
+
+        regex.enumerateMatches(in: text, range: nsRange) { match, _, _ in
+            guard let match,
+                  let range = Range(match.range(at: 1), in: text)
+            else {
+                return
+            }
+
+            let value = String(text[range])
+                .trimmingCharacters(in: CharacterSet(charactersIn: "`'\""))
+            guard !value.isEmpty, !seen.contains(value) else {
+                return
+            }
+            seen.insert(value)
+            matches.append(value)
+        }
+
+        return Array(matches.prefix(8))
     }
 }
