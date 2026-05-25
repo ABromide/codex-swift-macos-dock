@@ -38,10 +38,28 @@ final class UsageDashboardViewModel: ObservableObject {
     @Published var exportStatusText = ""
 
     private let analyzer = UsageStatsAnalyzer()
+    private let refreshQueue = DispatchQueue(label: "CodexDockNotifier.DashboardRefresh", qos: .utility)
+    private var refreshInProgress = false
 
     func refresh() {
-        report = analyzer.buildReport()
-        lastUpdatedText = Self.dateTimeFormatter.string(from: report.generatedAt)
+        guard !refreshInProgress else {
+            return
+        }
+
+        refreshInProgress = true
+        lastUpdatedText = "刷新中..."
+        let analyzer = analyzer
+        refreshQueue.async { [weak self] in
+            let report = analyzer.buildReport()
+            DispatchQueue.main.async { [weak self] in
+                guard let self else {
+                    return
+                }
+                self.report = report
+                self.lastUpdatedText = Self.dateTimeFormatter.string(from: report.generatedAt)
+                self.refreshInProgress = false
+            }
+        }
     }
 
     func exportMarkdown() {

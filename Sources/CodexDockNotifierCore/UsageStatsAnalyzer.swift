@@ -40,6 +40,7 @@ public final class UsageStatsAnalyzer: @unchecked Sendable {
     private let sessionIndexFile: URL
     private let stateDatabaseFile: URL
     private let calendar: Calendar
+    private let activeSessionMaxIdle: TimeInterval = 5 * 60
 
     public init(
         sessionsDirectory: URL = CodexDefaultPaths.sessionsDirectory,
@@ -417,7 +418,7 @@ public final class UsageStatsAnalyzer: @unchecked Sendable {
         }
 
         let lastActivityAt = session.latestEventAt ?? marker
-        guard now.timeIntervalSince(lastActivityAt) < 6 * 60 * 60 else {
+        guard now.timeIntervalSince(lastActivityAt) <= activeSessionMaxIdle else {
             return nil
         }
 

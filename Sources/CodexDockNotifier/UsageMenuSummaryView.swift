@@ -72,7 +72,7 @@ final class UsageMenuSummaryView: NSView {
 
         let pending = pendingCount > 0
             ? "\(pendingCount) 个未读完成"
-            : (runningCount > 0 ? "\(runningCount) 个运行中" : "无未读完成")
+            : (runningCount > 0 ? "\(runningCount) 个待完成" : "无未读完成")
         drawPill(
             pending,
             in: NSRect(x: rect.maxX - 112, y: rect.minY + 10, width: 98, height: 22),

@@ -6,13 +6,15 @@ final class CodexMonitor: @unchecked Sendable {
     private let sessionIndexFile: URL
     private let stateFile: URL
     private let onCompletion: (CodexCompletion) -> Void
+    private let queue = DispatchQueue(label: "CodexDockNotifier.Monitor", qos: .utility)
 
-    private var timer: Timer?
+    private var timer: DispatchSourceTimer?
     private var state: WatchState
     private var notifiedKeys: Set<String>
     private var threadNames: [String: String] = [:]
     private var lastIndexModificationDate: Date?
     private let hasExistingState: Bool
+    private var stateDirty = false
 
     init(
         sessionsDirectory: URL = CodexDefaultPaths.sessionsDirectory,
@@ -32,27 +34,39 @@ final class CodexMonitor: @unchecked Sendable {
     }
 
     func start() {
-        reloadSessionIndexIfNeeded(force: true)
-        scan(notify: hasExistingState)
-        saveState()
+        queue.async {
+            self.reloadSessionIndexIfNeeded(force: true)
+            self.scan(notify: self.hasExistingState)
+            self.saveStateIfNeeded(force: true)
 
-        timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            self?.scan(notify: true)
+            let timer = DispatchSource.makeTimerSource(queue: self.queue)
+            timer.schedule(deadline: .now() + 2.0, repeating: 2.0)
+            timer.setEventHandler { [weak self] in
+                self?.scan(notify: true)
+            }
+            self.timer = timer
+            timer.resume()
         }
     }
 
     func stop() {
-        timer?.invalidate()
-        timer = nil
-        saveState()
+        queue.sync {
+            timer?.cancel()
+            timer = nil
+            saveStateIfNeeded(force: true)
+        }
     }
 
     func scanNow() {
-        scan(notify: true)
+        queue.async {
+            self.scan(notify: true)
+        }
     }
 
     func completionHistory() -> [CodexCompletion] {
-        state.completionHistory
+        queue.sync {
+            state.completionHistory
+        }
     }
 
     private func scan(notify: Bool) {
@@ -70,7 +84,7 @@ final class CodexMonitor: @unchecked Sendable {
             processFile(at: url, notify: notify)
         }
 
-        saveState()
+        saveStateIfNeeded()
     }
 
     private func processFile(at url: URL, notify: Bool) {
@@ -84,6 +98,7 @@ final class CodexMonitor: @unchecked Sendable {
 
         if state.cursors[path] == nil {
             state.cursors[path] = FileCursor(offset: notify ? 0 : fileSize)
+            stateDirty = true
         }
 
         guard var cursor = state.cursors[path] else {
@@ -95,12 +110,18 @@ final class CodexMonitor: @unchecked Sendable {
         }
 
         guard fileSize > cursor.offset else {
-            state.cursors[path] = cursor
+            if state.cursors[path] != cursor {
+                state.cursors[path] = cursor
+                stateDirty = true
+            }
             return
         }
 
         guard let data = readData(from: url, offset: cursor.offset), !data.isEmpty else {
-            state.cursors[path] = cursor
+            if state.cursors[path] != cursor {
+                state.cursors[path] = cursor
+                stateDirty = true
+            }
             return
         }
 
@@ -133,7 +154,10 @@ final class CodexMonitor: @unchecked Sendable {
         }
 
         cursor.offset = consumedOffset
-        state.cursors[path] = cursor
+        if state.cursors[path] != cursor {
+            state.cursors[path] = cursor
+            stateDirty = true
+        }
     }
 
     private func handle(_ completion: CodexCompletion, notify: Bool) {
@@ -146,6 +170,7 @@ final class CodexMonitor: @unchecked Sendable {
             notifiedKeys = Set(notifiedKeys.suffix(800))
         }
         state.notifiedKeys = Array(notifiedKeys).sorted()
+        stateDirty = true
 
         guard notify else {
             return
@@ -161,6 +186,7 @@ final class CodexMonitor: @unchecked Sendable {
         if state.completionHistory.count > 200 {
             state.completionHistory = Array(state.completionHistory.prefix(200))
         }
+        stateDirty = true
     }
 
     private func readData(from url: URL, offset: UInt64) -> Data? {
@@ -189,10 +215,15 @@ final class CodexMonitor: @unchecked Sendable {
         lastIndexModificationDate = modificationDate
     }
 
-    private func saveState() {
+    private func saveStateIfNeeded(force: Bool = false) {
+        guard force || stateDirty else {
+            return
+        }
+
         do {
             state.notifiedKeys = Array(notifiedKeys).sorted()
             try state.save(to: stateFile)
+            stateDirty = false
         } catch {
             NSLog("CodexDockNotifier failed to save state: \(error)")
         }

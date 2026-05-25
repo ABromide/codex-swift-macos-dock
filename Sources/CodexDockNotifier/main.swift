@@ -17,6 +17,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     private var activityTimer: Timer?
     private var longTaskReminderKeys: Set<String> = []
     private let longTaskReminderThreshold: TimeInterval = 10 * 60
+    private let usageRefreshQueue = DispatchQueue(label: "CodexDockNotifier.UsageRefresh", qos: .utility)
+    private var cachedReport: UsageReport = .empty
+    private var usageRefreshInProgress = false
+    private var lastUsageRefreshAt = Date.distantPast
+    private let usageRefreshMinInterval: TimeInterval = 20
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
@@ -32,7 +37,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         }
         completionHistory = monitor?.completionHistory() ?? []
         monitor?.start()
-        refreshActivityStatus()
+        requestUsageRefresh(force: true)
         startActivityTimer()
         updateMenu()
     }
@@ -193,21 +198,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         if pendingCount > 0 {
             button.toolTip = "\(pendingCount) 个 Codex 任务已完成"
         } else if !runningSessions.isEmpty {
-            button.toolTip = "\(runningSessions.count) 个 Codex 任务正在运行"
+            button.toolTip = "\(runningSessions.count) 个 Codex 任务待完成"
         } else {
             button.toolTip = "Codex 当前空闲"
         }
     }
 
     private func updateMenu() {
-        let report = usageAnalyzer.buildReport()
-        runningSessions = report.runningSessions
-
         let menu = NSMenu()
         menu.delegate = self
 
         let summary = UsageMenuSummaryView(
-            report: report,
+            report: cachedReport,
             pendingCount: pendingCount,
             lastCompletion: lastCompletion,
             runningCount: runningSessions.count
@@ -227,7 +229,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
 
         if !runningSessions.isEmpty {
             let runningItem = NSMenuItem(
-                title: "运行中：\(runningSessions.count) 个任务",
+                title: "活跃任务：\(runningSessions.count) 个待完成",
                 action: nil,
                 keyEquivalent: ""
             )
@@ -278,18 +280,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
 
         statusItem?.menu = menu
         updateStatusItem()
+        requestUsageRefresh(sendReminders: false)
     }
 
     func menuWillOpen(_ menu: NSMenu) {
-        let report = usageAnalyzer.buildReport()
-        runningSessions = report.runningSessions
         usageSummaryView?.update(
-            report: report,
+            report: cachedReport,
             pendingCount: pendingCount,
             lastCompletion: lastCompletion,
             runningCount: runningSessions.count
         )
         updateStatusItem()
+        requestUsageRefresh()
     }
 
     @objc private func openCodexMenuItem() {
@@ -408,7 +410,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     }
 
     private func refreshActivityStatus(sendReminders: Bool = true) {
-        let report = usageAnalyzer.buildReport()
+        requestUsageRefresh(sendReminders: sendReminders)
+    }
+
+    private func requestUsageRefresh(force: Bool = false, sendReminders: Bool = true) {
+        let now = Date()
+        if !force && now.timeIntervalSince(lastUsageRefreshAt) < usageRefreshMinInterval {
+            applyUsageReport(cachedReport, sendReminders: sendReminders)
+            return
+        }
+
+        guard !usageRefreshInProgress else {
+            return
+        }
+
+        usageRefreshInProgress = true
+        let analyzer = usageAnalyzer
+        usageRefreshQueue.async { [weak self] in
+            let report = analyzer.buildReport()
+            DispatchQueue.main.async { [weak self] in
+                guard let self else {
+                    return
+                }
+                self.usageRefreshInProgress = false
+                self.lastUsageRefreshAt = Date()
+                self.applyUsageReport(report, sendReminders: sendReminders)
+            }
+        }
+    }
+
+    private func applyUsageReport(_ report: UsageReport, sendReminders: Bool) {
+        cachedReport = report
         runningSessions = report.runningSessions
         if sendReminders {
             sendLongTaskRemindersIfNeeded(for: runningSessions)
@@ -437,7 +469,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
 
     private func postLongTaskNotification(for session: RunningSession) {
         let content = UNMutableNotificationContent()
-        content.title = "Codex 长任务仍在运行"
+        content.title = "Codex 长任务仍在活跃"
         content.subtitle = session.title
         content.body = "已运行 \(formatDuration(session.runningForSeconds)) · \(session.model)"
         content.sound = .default

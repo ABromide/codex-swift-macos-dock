@@ -50,7 +50,7 @@ let analyzer = UsageStatsAnalyzer(
     sessionIndexFile: indexFile,
     stateDatabaseFile: temporaryRoot.appendingPathComponent("missing.sqlite")
 )
-let report = analyzer.buildReport(now: ISO8601DateFormatter().date(from: "2026-05-25T13:00:00Z")!)
+let report = analyzer.buildReport(now: ISO8601DateFormatter().date(from: "2026-05-25T12:55:00Z")!)
 precondition(report.totalUsage.total == 140)
 precondition(report.todayUsage.cachedInput == 30)
 precondition(report.last7DaysUsage.output == 30)
